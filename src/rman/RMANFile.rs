@@ -1,10 +1,12 @@
 use nom::{
     bytes::complete::tag,
     error::{context, VerboseError},
+    multi::length_data,
     number::complete::{le_u32, le_u64, le_u8},
     sequence::tuple,
     AsBytes, IResult,
 };
+use std::process::exit;
 
 #[path = "../macros.rs"]
 mod macros;
@@ -55,18 +57,66 @@ struct Chunk {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct Body {}
+struct Language {
+    id: u32,
+    name: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FileEntry {
+    id: u64,
+    name: String,
+    symlink: String,
+    directory_id: u64,
+    size: u32,
+    language: u32,
+    chunk_ids: Vec<u64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Directory {
+    id: u64,
+    parent_id: u64,
+    name: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Body {
+    bundles: Vec<Bundle>,
+    languages: Vec<Language>,
+    files: Vec<FileEntry>,
+    directories: Vec<Directory>,
+}
 
 pub fn parse(input: &[u8]) -> File {
     let header = header(input).unwrap().1;
     let body_data = &input[header.offset as usize..(header.offset + header.length) as usize];
     let decompressed = zstd::decode_all(body_data).unwrap();
     let offsets = offset_map(decompressed.as_bytes()).unwrap().1;
-    let bundles = bundles(&decompressed[offsets.bundle_offset as usize..]);
+    let bundles = bundles(&decompressed[offsets.bundle_offset as usize..])
+        .unwrap()
+        .1;
+    let languages = languages(&decompressed[offsets.language_offset as usize..])
+        .unwrap()
+        .1;
 
-    println!("{:?}", bundles);
+    let files = files(&decompressed[offsets.file_offset as usize..])
+        .unwrap()
+        .1;
 
-    let body = Body {};
+    println!("{:?}", files);
+
+    let directories = directories(&decompressed[offsets.folder_offset as usize..])
+        .unwrap()
+        .1;
+
+    let body = Body {
+        bundles,
+        languages,
+        files,
+        directories,
+    };
+
     File { header, body }
 }
 
@@ -185,4 +235,48 @@ fn bundles(input: &[u8]) -> Res<&[u8], Vec<Bundle>> {
     }
 
     Ok((input, bundles))
+}
+
+fn languages(input: &[u8]) -> Res<&[u8], Vec<Language>> {
+    let mut languages = Vec::<Language>::new();
+    let language_count = crate::parse_single!(le_u32, input);
+
+    for i in 0..language_count {
+        let language_position = 4 + 4 * i;
+        let language_offset = crate::parse_single!(le_u32, &input[language_position as usize..]);
+
+        let language_data = &input[(language_position + language_offset) as usize..];
+        let language_id = crate::parse_single!(le_u32, &language_data[4..]);
+        let language_name_offset = crate::parse_single!(le_u32, &language_data[8..]);
+
+        let language_name_data = &language_data[8 + language_name_offset as usize..];
+        let language_name_size = crate::parse_single!(le_u32, language_name_data);
+
+        let language_name =
+            String::from_utf8_lossy(&language_name_data[4..4 + language_name_size as usize])
+                .into_owned();
+
+        languages.push(Language {
+            id: language_id,
+            name: language_name,
+        });
+    }
+
+    Ok((input, languages))
+}
+
+fn files(input: &[u8]) -> Res<&[u8], Vec<FileEntry>> {
+    let mut files = Vec::<FileEntry>::new();
+
+    todo!("File parsing");
+
+    Ok((input, files))
+}
+
+fn directories(input: &[u8]) -> Res<&[u8], Vec<Directory>> {
+    let mut directories = Vec::<Directory>::new();
+
+    todo!("Directory parsing");
+
+    Ok((input, directories))
 }
