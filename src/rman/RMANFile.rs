@@ -11,8 +11,6 @@ use std::process::exit;
 #[path = "../macros.rs"]
 mod macros;
 
-type Res<T, U> = IResult<T, U, VerboseError<T>>;
-
 #[derive(Debug, PartialEq, Eq)]
 pub struct File {
     header: Header,
@@ -89,26 +87,18 @@ struct Body {
 }
 
 pub fn parse(input: &[u8]) -> File {
-    let header = header(input).unwrap().1;
+    let header = header(input);
     let body_data = &input[header.offset as usize..(header.offset + header.length) as usize];
+
     let decompressed = zstd::decode_all(body_data).unwrap();
-    let offsets = offset_map(decompressed.as_bytes()).unwrap().1;
-    let bundles = bundles(&decompressed[offsets.bundle_offset as usize..])
-        .unwrap()
-        .1;
-    let languages = languages(&decompressed[offsets.language_offset as usize..])
-        .unwrap()
-        .1;
 
-    let files = files(&decompressed[offsets.file_offset as usize..])
-        .unwrap()
-        .1;
-
+    let offsets = offset_map(&decompressed);
+    let bundles = bundles(&decompressed[offsets.bundle_offset as usize..]);
+    let languages = languages(&decompressed[offsets.language_offset as usize..]);
+    let files = files(&decompressed[offsets.file_offset as usize..]);
     println!("{:?}", files);
 
-    let directories = directories(&decompressed[offsets.folder_offset as usize..])
-        .unwrap()
-        .1;
+    let directories = directories(&decompressed[offsets.folder_offset as usize..]);
 
     let body = Body {
         bundles,
@@ -120,10 +110,19 @@ pub fn parse(input: &[u8]) -> File {
     File { header, body }
 }
 
-fn header(input: &[u8]) -> Res<&[u8], Header> {
-    context(
-        "RMANHeader",
-        tuple((
+fn header(input: &[u8]) -> Header {
+    let (
+        magic,
+        major,
+        minor,
+        unknown,
+        signature_type,
+        offset,
+        length,
+        manifest_id,
+        decompressed_length,
+    ) = crate::parse_tuple!(
+        (
             tag("RMAN"),
             le_u8,
             le_u8,
@@ -133,70 +132,51 @@ fn header(input: &[u8]) -> Res<&[u8], Header> {
             le_u32,
             le_u64,
             le_u32,
-        )),
-    )(input)
-    .map(|(next, res)| {
-        let (
-            magic,
-            major,
-            minor,
-            unknown,
-            signature_type,
-            offset,
-            length,
-            manifest_id,
-            decompressed_length,
-        ) = res;
-        (
-            next,
-            Header {
-                magic: String::from_utf8_lossy(magic).into_owned(),
-                major,
-                minor,
-                unknown,
-                signature_type,
-                offset,
-                length,
-                manifest_id,
-                decompressed_length,
-            },
-        )
-    })
+        ),
+        input
+    );
+
+    Header {
+        magic: String::from_utf8_lossy(magic).into_owned(),
+        major,
+        minor,
+        unknown,
+        signature_type,
+        offset,
+        length,
+        manifest_id,
+        decompressed_length,
+    }
 }
 
-fn offset_map(input: &[u8]) -> Res<&[u8], OffsetMap> {
+fn offset_map(input: &[u8]) -> OffsetMap {
     let header_offset = crate::parse_single!(le_u32, input);
 
-    context(
-        "RMANBody->headers",
-        tuple((le_u32, le_u32, le_u32, le_u32, le_u32, le_u32, le_u32)),
-    )(&input[header_offset as usize..])
-    .map(|(next, res)| {
-        let (
-            table_offset,
-            bundle_offset,
-            language_offset,
-            file_offset,
-            folder_offset,
-            key_offset,
-            unknown_offset,
-        ) = res;
-        (
-            next,
-            OffsetMap {
-                table_offset,
-                bundle_offset: header_offset + bundle_offset + 4,
-                language_offset: header_offset + language_offset + 8,
-                file_offset: header_offset + file_offset + 12,
-                folder_offset: header_offset + folder_offset + 16,
-                key_offset: header_offset + key_offset + 20,
-                unknown_offset: header_offset + unknown_offset + 24,
-            },
-        )
-    })
+    let (
+        table_offset,
+        bundle_offset,
+        language_offset,
+        file_offset,
+        folder_offset,
+        key_offset,
+        unknown_offset,
+    ) = crate::parse_tuple!(
+        (le_u32, le_u32, le_u32, le_u32, le_u32, le_u32, le_u32,),
+        &input[header_offset as usize..]
+    );
+
+    OffsetMap {
+        table_offset,
+        bundle_offset: header_offset + bundle_offset + 4,
+        language_offset: header_offset + language_offset + 8,
+        file_offset: header_offset + file_offset + 12,
+        folder_offset: header_offset + folder_offset + 16,
+        key_offset: header_offset + key_offset + 20,
+        unknown_offset: header_offset + unknown_offset + 24,
+    }
 }
 
-fn bundles(input: &[u8]) -> Res<&[u8], Vec<Bundle>> {
+fn bundles(input: &[u8]) -> Vec<Bundle> {
     let mut bundles = Vec::<Bundle>::new();
     let bundle_count = crate::parse_single!(le_u32, input);
 
@@ -205,39 +185,37 @@ fn bundles(input: &[u8]) -> Res<&[u8], Vec<Bundle>> {
         let bundle_offset = crate::parse_single!(le_u32, &input[input_position as usize..]);
 
         let bundle_data = &input[(input_position + bundle_offset) as usize..];
-        let header_size = crate::parse_single!(le_u32, &bundle_data[4..]);
-        let bundle_id = crate::parse_single!(le_u64, &bundle_data[8..]);
+        let (_, header_size, bundle_id) =
+            crate::parse_tuple!((le_u32, le_u32, le_u64), bundle_data);
 
-        let chunk_count = crate::parse_single!(le_u32, &bundle_data[(4 + header_size) as usize..]);
+        let chunk_count_offset = 4 + header_size;
+        let chunk_count = crate::parse_single!(le_u32, &bundle_data[chunk_count_offset as usize..]);
         let mut chunks = Vec::<Chunk>::new();
 
         for j in 0..chunk_count {
             let chunk_position = 4 + 4 * j;
-            let chunk_offset = crate::parse_single!(
-                le_u32,
-                &bundle_data[(4 + header_size + chunk_position) as usize..]
-            );
+            let chunk_data_position = chunk_count_offset + chunk_position;
+            let chunk_offset =
+                crate::parse_single!(le_u32, &bundle_data[chunk_data_position as usize..]);
 
-            let chunk_data =
-                &bundle_data[(4 + header_size + chunk_position + chunk_offset) as usize..];
-            let compressed_size = crate::parse_single!(le_u32, &chunk_data[4..]);
-            let uncompressed_size = crate::parse_single!(le_u32, &chunk_data[8..]);
-            let chunk_id = crate::parse_single!(le_u64, &chunk_data[12..]);
+            let chunk_data = &bundle_data[(chunk_data_position + chunk_offset) as usize..];
+            let (_, compressed_size, uncompressed_size, chunk_id) =
+                crate::parse_tuple!((le_u32, le_u32, le_u32, le_u64), chunk_data);
 
             chunks.push(Chunk {
                 compressed_size,
                 uncompressed_size,
                 chunk_id,
-            })
+            });
         }
 
-        bundles.push(Bundle { bundle_id, chunks })
+        bundles.push(Bundle { bundle_id, chunks });
     }
 
-    Ok((input, bundles))
+    bundles
 }
 
-fn languages(input: &[u8]) -> Res<&[u8], Vec<Language>> {
+fn languages(input: &[u8]) -> Vec<Language> {
     let mut languages = Vec::<Language>::new();
     let language_count = crate::parse_single!(le_u32, input);
 
@@ -246,8 +224,8 @@ fn languages(input: &[u8]) -> Res<&[u8], Vec<Language>> {
         let language_offset = crate::parse_single!(le_u32, &input[language_position as usize..]);
 
         let language_data = &input[(language_position + language_offset) as usize..];
-        let language_id = crate::parse_single!(le_u32, &language_data[4..]);
-        let language_name_offset = crate::parse_single!(le_u32, &language_data[8..]);
+        let (_, language_id, language_name_offset) =
+            crate::parse_tuple!((le_u32, le_u32, le_u32), language_data);
 
         let language_name_data = &language_data[8 + language_name_offset as usize..];
         let language_name_size = crate::parse_single!(le_u32, language_name_data);
@@ -262,21 +240,21 @@ fn languages(input: &[u8]) -> Res<&[u8], Vec<Language>> {
         });
     }
 
-    Ok((input, languages))
+    languages
 }
 
-fn files(input: &[u8]) -> Res<&[u8], Vec<FileEntry>> {
+fn files(input: &[u8]) -> Vec<FileEntry> {
     let mut files = Vec::<FileEntry>::new();
 
-    todo!("File parsing");
+    //todo!("File parsing");
 
-    Ok((input, files))
+    files
 }
 
-fn directories(input: &[u8]) -> Res<&[u8], Vec<Directory>> {
+fn directories(input: &[u8]) -> Vec<Directory> {
     let mut directories = Vec::<Directory>::new();
 
-    todo!("Directory parsing");
+    //todo!("Directory parsing");
 
-    Ok((input, directories))
+    directories
 }
