@@ -1,0 +1,8 @@
+[package]
+name = "rusty_dragon"
+version = "1.0.0"
+edition = "2018"
+
+[dependencies]
+nom = "6"
+zstd = "0.9"
