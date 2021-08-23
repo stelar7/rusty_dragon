@@ -1,7 +1,7 @@
 use nom::{
     bytes::complete::tag,
     error::VerboseError,
-    number::complete::{le_u32, le_u64, le_u8},
+    number::complete::{le_i32, le_u16, le_u32, le_u64, le_u8},
     sequence::tuple,
 };
 
@@ -90,10 +90,9 @@ pub fn parse(input: &[u8]) -> File {
     let offsets = offset_map(&decompressed);
     let bundles = bundles(&decompressed[offsets.bundle_offset as usize..]);
     let languages = languages(&decompressed[offsets.language_offset as usize..]);
+    let directories = directories(&decompressed[offsets.folder_offset as usize..]);
     let files = files(&decompressed[offsets.file_offset as usize..]);
     println!("{:?}", files);
-
-    let directories = directories(&decompressed[offsets.folder_offset as usize..]);
 
     let body = Body { bundles, languages, files, directories };
 
@@ -187,18 +186,51 @@ fn languages(input: &[u8]) -> Vec<Language> {
     languages
 }
 
-fn files(input: &[u8]) -> Vec<FileEntry> {
-    let mut files = Vec::<FileEntry>::new();
-
-    //todo!("File parsing");
-
-    files
-}
-
 fn directories(input: &[u8]) -> Vec<Directory> {
     let mut directories = Vec::<Directory>::new();
 
-    //todo!("Directory parsing");
+    let directories_count = crate::parse_single!(le_u32, input);
+
+    for i in 0..directories_count {
+        let directories_position = 4 + 4 * i;
+        let directories_offset = crate::parse_single!(le_u32, &input[directories_position as usize..]);
+
+        let data_root = directories_position + directories_offset;
+        let directories_data = &input[data_root as usize..];
+        let (offset_table_offset, name_offset) = crate::parse_tuple!((le_i32, le_i32), directories_data);
+
+        let directory_entry_offset = data_root + 4;
+        let offset_table_position = (directory_entry_offset as i32) - offset_table_offset;
+        let (directory_id_offset, parent_id_offset) =
+            crate::parse_tuple!((le_u16, le_u16), &input[offset_table_position as usize..]);
+
+        let directory_id = if directory_id_offset == 0 {
+            0
+        } else {
+            crate::parse_single!(le_u64, &input[(data_root + (directory_id_offset as u32)) as usize..])
+        };
+
+        let parent_id = if parent_id_offset == 0 {
+            0
+        } else {
+            crate::parse_single!(le_u64, &input[(data_root + (parent_id_offset as u32)) as usize..])
+        };
+
+        let name_offset_position = directory_entry_offset + (name_offset as u32);
+        let file_name_data = &input[name_offset_position as usize..];
+        let file_name_size = crate::parse_single!(le_u32, file_name_data);
+        let file_name = String::from_utf8_lossy(&file_name_data[4..4 + file_name_size as usize]).into_owned();
+
+        directories.push(Directory { id: directory_id, name: file_name, parent_id });
+    }
 
     directories
+}
+
+fn files(input: &[u8]) -> Vec<FileEntry> {
+    let mut files = Vec::<FileEntry>::new();
+
+    todo!("File parsing");
+
+    files
 }
