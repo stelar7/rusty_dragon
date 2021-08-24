@@ -141,7 +141,6 @@ where
 
         let entry_data_offset = entry_position + offset + table_offset;
 
-        // Bundle spesific
         let entry_offsets = parse_vtable(input, entry_data_offset, parts);
         f(entry_data_offset, entry_offsets);
     }
