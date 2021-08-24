@@ -4,6 +4,8 @@ use nom::{
     number::complete::{le_i32, le_u16, le_u32, le_u64, le_u8},
     sequence::tuple,
 };
+use std::collections::HashMap;
+use std::process::exit;
 
 #[path = "../macros.rs"]
 mod macros;
@@ -50,7 +52,7 @@ struct Chunk {
 
 #[derive(Debug, PartialEq, Eq)]
 struct Language {
-    id: u32,
+    id: u8,
     name: String,
 }
 
@@ -88,11 +90,11 @@ pub fn parse(input: &[u8]) -> File {
     let decompressed = zstd::decode_all(body_data).unwrap();
 
     let offsets = offset_map(&decompressed);
-    let bundles = bundles(&decompressed[offsets.bundle_offset as usize..]);
-    let languages = languages(&decompressed[offsets.language_offset as usize..]);
-    let directories = directories(&decompressed[offsets.folder_offset as usize..]);
-    let files = files(&decompressed[offsets.file_offset as usize..]);
-    println!("{:?}", files);
+    let bundles = bundles(&decompressed, offsets.bundle_offset);
+    let languages = languages(&decompressed, offsets.language_offset);
+    let directories = directories(&decompressed, offsets.folder_offset);
+    let files = files(&decompressed, offsets.file_offset);
+    println!("{:?}", directories);
 
     let body = Body { bundles, languages, files, directories };
 
@@ -130,107 +132,156 @@ fn offset_map(input: &[u8]) -> OffsetMap {
     }
 }
 
-fn bundles(input: &[u8]) -> Vec<Bundle> {
-    let mut bundles = Vec::<Bundle>::new();
-    let bundle_count = crate::parse_single!(le_u32, input);
+fn parse_vector<F>(input: &[u8], table_offset: u32, parts: &Vec<&str>, f: &mut F)
+where
+    F: FnMut(u32, HashMap<String, u16>),
+{
+    let count = crate::parse_single!(le_u32, &input[table_offset as usize..]);
 
-    for i in 0..bundle_count {
-        let input_position = 4 + 4 * i;
-        let bundle_offset = crate::parse_single!(le_u32, &input[input_position as usize..]);
+    for i in 0..count {
+        let entry_position = 4 + 4 * i;
+        let offset = crate::parse_single!(le_u32, &input[(table_offset + entry_position) as usize..]);
 
-        let bundle_data = &input[(input_position + bundle_offset) as usize..];
-        let (_, header_size, bundle_id) = crate::parse_tuple!((le_u32, le_u32, le_u64), bundle_data);
+        let entry_data_offset = entry_position + offset + table_offset;
 
-        let chunk_count_offset = 4 + header_size;
-        let chunk_count = crate::parse_single!(le_u32, &bundle_data[chunk_count_offset as usize..]);
-        let mut chunks = Vec::<Chunk>::new();
-
-        for j in 0..chunk_count {
-            let chunk_position = 4 + 4 * j;
-            let chunk_data_position = chunk_count_offset + chunk_position;
-            let chunk_offset = crate::parse_single!(le_u32, &bundle_data[chunk_data_position as usize..]);
-
-            let chunk_data = &bundle_data[(chunk_data_position + chunk_offset) as usize..];
-            let (_, compressed_size, uncompressed_size, chunk_id) =
-                crate::parse_tuple!((le_u32, le_u32, le_u32, le_u64), chunk_data);
-
-            chunks.push(Chunk { compressed_size, uncompressed_size, chunk_id });
-        }
-
-        bundles.push(Bundle { bundle_id, chunks });
+        // Bundle spesific
+        let entry_offsets = parse_vtable(input, entry_data_offset, parts);
+        f(entry_data_offset, entry_offsets);
     }
+}
+
+fn parse_vtable(input: &[u8], table_offset: u32, entries: &[&str]) -> HashMap<String, u16> {
+    let offset = crate::parse_single!(le_i32, &input[table_offset as usize..]);
+    let vtable_data = &input[(table_offset as i32 - offset) as usize..];
+
+    let mut offsets = HashMap::<String, u16>::new();
+    for (index, &element) in entries.iter().enumerate() {
+        let value = crate::parse_single!(le_u16, &vtable_data[(index * 2) as usize..]);
+        offsets.insert(element.to_owned(), value);
+    }
+
+    offsets
+}
+
+fn bundles(input: &[u8], bundles_start: u32) -> Vec<Bundle> {
+    let mut bundles = Vec::<Bundle>::new();
+
+    let mut parse_single_bundle = |start_offset: u32, entry_offsets: HashMap<String, u16>| {
+        let bundle_id_offset = entry_offsets.get("bundle_id").unwrap().to_owned();
+        let bundle_id = crate::parse_single!(le_u64, &input[(start_offset + bundle_id_offset as u32) as usize..]);
+
+        let mut chunks_list = Vec::<Chunk>::new();
+        let chunks_offset = entry_offsets.get("chunks").unwrap().to_owned();
+        let mut parse_single_chunk = |start_offset: u32, entry_offsets: HashMap<String, u16>| {
+            let chunk_id_offset = entry_offsets.get("chunk_id").unwrap().to_owned();
+            let chunk_id = crate::parse_single!(le_u64, &input[(start_offset + chunk_id_offset as u32) as usize..]);
+
+            let compressed_size_offset = entry_offsets.get("compressed_size").unwrap().to_owned();
+            let compressed_size = crate::parse_single!(le_u32, &input[(start_offset + compressed_size_offset as u32) as usize..]);
+
+            let uncompressed_size_offset = entry_offsets.get("uncompressed_size").unwrap().to_owned();
+            let uncompressed_size = crate::parse_single!(le_u32, &input[(start_offset + uncompressed_size_offset as u32) as usize..]);
+
+            chunks_list.push(Chunk { chunk_id, compressed_size, uncompressed_size });
+        };
+
+        let chunk_offset_parts = ["unknown1", "unknown2", "chunk_id", "compressed_size", "uncompressed_size"].to_vec();
+        parse_vector(input, start_offset + chunks_offset as u32, &chunk_offset_parts, &mut parse_single_chunk);
+
+        bundles.push(Bundle { bundle_id, chunks: chunks_list });
+    };
+
+    let bundle_offset_parts = ["bundle_id", "chunks", "unknown", "header_size"].to_vec();
+    parse_vector(input, bundles_start, &bundle_offset_parts, &mut parse_single_bundle);
 
     bundles
 }
 
-fn languages(input: &[u8]) -> Vec<Language> {
+fn languages(input: &[u8], languages_start: u32) -> Vec<Language> {
     let mut languages = Vec::<Language>::new();
-    let language_count = crate::parse_single!(le_u32, input);
 
-    for i in 0..language_count {
-        let language_position = 4 + 4 * i;
-        let language_offset = crate::parse_single!(le_u32, &input[language_position as usize..]);
+    let mut parse_single_language = |start_offset: u32, entry_offsets: HashMap<String, u16>| {
+        let name_offset = entry_offsets.get("name_offset").unwrap().to_owned() as u32;
+        let name_position = crate::parse_single!(le_u32, &input[(start_offset + name_offset as u32) as usize..]);
+        let name_data_offset = start_offset + name_offset + name_position;
+        let name_length = crate::parse_single!(le_u32, &input[name_data_offset as usize..]);
+        let name =
+            String::from_utf8_lossy(&input[(name_data_offset + 4) as usize..(name_data_offset + 4 + name_length) as usize]).into_owned();
 
-        let language_data = &input[(language_position + language_offset) as usize..];
-        let (_, language_id, language_name_offset) = crate::parse_tuple!((le_u32, le_u32, le_u32), language_data);
+        let language_id_offset = entry_offsets.get("language_id").unwrap().to_owned();
+        let language_id = crate::parse_single!(le_u8, &input[(start_offset + language_id_offset as u32) as usize..]);
 
-        let language_name_data = &language_data[8 + language_name_offset as usize..];
-        let language_name_size = crate::parse_single!(le_u32, language_name_data);
+        languages.push(Language { id: language_id, name });
+    };
 
-        let language_name =
-            String::from_utf8_lossy(&language_name_data[4..4 + language_name_size as usize]).into_owned();
-
-        languages.push(Language { id: language_id, name: language_name });
-    }
+    let languages_offset_parts = ["name_offset", "unknown1", "language_id"].to_vec();
+    parse_vector(input, languages_start, &languages_offset_parts, &mut parse_single_language);
 
     languages
 }
 
-fn directories(input: &[u8]) -> Vec<Directory> {
+fn directories(input: &[u8], directories_start: u32) -> Vec<Directory> {
     let mut directories = Vec::<Directory>::new();
 
-    let directories_count = crate::parse_single!(le_u32, input);
+    let mut parse_single_directory = |start_offset: u32, entry_offsets: HashMap<String, u16>| {
+        let name_offset = entry_offsets.get("name_offset").unwrap().to_owned() as u32;
+        let name_position = crate::parse_single!(le_u32, &input[(start_offset + name_offset as u32) as usize..]);
+        let name_data_offset = start_offset + name_offset + name_position;
+        let name_length = crate::parse_single!(le_u32, &input[name_data_offset as usize..]);
+        let name =
+            String::from_utf8_lossy(&input[(name_data_offset + 4) as usize..(name_data_offset + 4 + name_length) as usize]).into_owned();
 
-    for i in 0..directories_count {
-        let directories_position = 4 + 4 * i;
-        let directories_offset = crate::parse_single!(le_u32, &input[directories_position as usize..]);
-
-        let data_root = directories_position + directories_offset;
-        let directories_data = &input[data_root as usize..];
-        let (offset_table_offset, name_offset) = crate::parse_tuple!((le_i32, le_i32), directories_data);
-
-        let directory_entry_offset = data_root + 4;
-        let offset_table_position = (directory_entry_offset as i32) - offset_table_offset;
-        let (directory_id_offset, parent_id_offset) =
-            crate::parse_tuple!((le_u16, le_u16), &input[offset_table_position as usize..]);
-
-        let directory_id = if directory_id_offset == 0 {
-            0
+        let directory_id_offset = entry_offsets.get("directory_id").unwrap().to_owned();
+        let directory_id = if directory_id_offset > 0 {
+            crate::parse_single!(le_u64, &input[(start_offset + directory_id_offset as u32) as usize..])
         } else {
-            crate::parse_single!(le_u64, &input[(data_root + (directory_id_offset as u32)) as usize..])
+            0
         };
 
-        let parent_id = if parent_id_offset == 0 {
-            0
+        let parent_id_offset = entry_offsets.get("parent_id").unwrap().to_owned();
+        let parent_id = if parent_id_offset > 0 {
+            crate::parse_single!(le_u64, &input[(start_offset + parent_id_offset as u32) as usize..])
         } else {
-            crate::parse_single!(le_u64, &input[(data_root + (parent_id_offset as u32)) as usize..])
+            0
         };
 
-        let name_offset_position = directory_entry_offset + (name_offset as u32);
-        let file_name_data = &input[name_offset_position as usize..];
-        let file_name_size = crate::parse_single!(le_u32, file_name_data);
-        let file_name = String::from_utf8_lossy(&file_name_data[4..4 + file_name_size as usize]).into_owned();
+        directories.push(Directory { id: directory_id, name, parent_id });
+    };
 
-        directories.push(Directory { id: directory_id, name: file_name, parent_id });
-    }
+    let directory_offset_parts = ["unknown1", "unknown2", "directory_id", "parent_id", "name_offset"].to_vec();
+    parse_vector(input, directories_start, &directory_offset_parts, &mut parse_single_directory);
 
     directories
 }
 
-fn files(input: &[u8]) -> Vec<FileEntry> {
+fn files(input: &[u8], files_start: u32) -> Vec<FileEntry> {
     let mut files = Vec::<FileEntry>::new();
 
-    todo!("File parsing");
+    let mut parse_single_file = |start_offset: u32, entry_offsets: HashMap<String, u16>| {
+        println!("{:?}", entry_offsets);
+        exit(0);
+    };
+
+    let files_offset_parts = [
+        "unknown1",
+        "chunks",
+        "file_id",
+        "directory_id",
+        "file_size",
+        "name",
+        "flags",
+        "unknown2",
+        "unknown3",
+        "unknown4",
+        "unknown5",
+        "link",
+        "unknown6",
+        "unknown7",
+        "unknown8",
+    ]
+    .to_vec();
+
+    parse_vector(input, files_start, &files_offset_parts, &mut parse_single_file);
 
     files
 }

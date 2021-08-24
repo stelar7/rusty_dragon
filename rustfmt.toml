@@ -1,5 +1,5 @@
 use_small_heuristics="Max"
-max_width=120
+max_width=140
 group_imports="StdExternalCrate"
 match_arm_blocks=true
 match_block_trailing_comma=true
