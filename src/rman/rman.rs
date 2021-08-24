@@ -5,7 +5,6 @@ use nom::{
     sequence::tuple,
 };
 use std::collections::HashMap;
-use std::process::exit;
 
 #[path = "../macros.rs"]
 mod macros;
@@ -150,6 +149,19 @@ where
     }
 }
 
+fn parse_long_vector<F>(input: &[u8], start_offset: u32, f: &mut F)
+where
+    F: FnMut(u64),
+{
+    let count = crate::parse_single!(le_u32, &input[start_offset as usize..]);
+
+    for i in 0..count {
+        let entry_position = 4 + 8 * i;
+        let value = crate::parse_single!(le_u64, &input[(start_offset + entry_position) as usize..]);
+        f(value);
+    }
+}
+
 fn parse_vtable(input: &[u8], table_offset: u32, entries: &[&str]) -> HashMap<String, u16> {
     let offset = crate::parse_single!(le_i32, &input[table_offset as usize..]);
     let vtable_data = &input[(table_offset as i32 - offset) as usize..];
@@ -258,8 +270,43 @@ fn files(input: &[u8], files_start: u32) -> Vec<FileEntry> {
     let mut files = Vec::<FileEntry>::new();
 
     let mut parse_single_file = |start_offset: u32, entry_offsets: HashMap<String, u16>| {
-        println!("{:?}", entry_offsets);
-        exit(0);
+        let name_offset = entry_offsets.get("name_offset").unwrap().to_owned() as u32;
+        let name_position = crate::parse_single!(le_u32, &input[(start_offset + name_offset as u32) as usize..]);
+        let name_data_offset = start_offset + name_offset + name_position;
+        let name_length = crate::parse_single!(le_u32, &input[name_data_offset as usize..]);
+        let name =
+            String::from_utf8_lossy(&input[(name_data_offset + 4) as usize..(name_data_offset + 4 + name_length) as usize]).into_owned();
+
+        let symlink_offset = entry_offsets.get("symlink_offset").unwrap().to_owned() as u32;
+        let symlink_position = crate::parse_single!(le_u32, &input[(start_offset + symlink_offset as u32) as usize..]);
+        let symlink_data_offset = start_offset + symlink_offset + symlink_position;
+        let symlink_length = crate::parse_single!(le_u32, &input[symlink_data_offset as usize..]);
+        let symlink =
+            String::from_utf8_lossy(&input[(symlink_data_offset + 4) as usize..(symlink_data_offset + 4 + symlink_length) as usize])
+                .into_owned();
+
+        let file_id_offset = entry_offsets.get("file_id").unwrap().to_owned() as u32;
+        let file_id = crate::parse_single!(le_u64, &input[(start_offset + file_id_offset as u32) as usize..]);
+
+        let directory_id_offset = entry_offsets.get("directory_id").unwrap().to_owned() as u32;
+        let directory_id = crate::parse_single!(le_u64, &input[(start_offset + directory_id_offset as u32) as usize..]);
+
+        let file_size_id_offset = entry_offsets.get("file_size").unwrap().to_owned() as u32;
+        let file_size = crate::parse_single!(le_u32, &input[(start_offset + file_size_id_offset as u32) as usize..]);
+
+        let language_mask_offset = entry_offsets.get("language_mask").unwrap().to_owned() as u32;
+        let language_mask = crate::parse_single!(le_u32, &input[(start_offset + language_mask_offset as u32) as usize..]);
+
+        let mut chunks = Vec::<u64>::new();
+        let chunks_offset = entry_offsets.get("chunks").unwrap().to_owned() as u32;
+
+        let mut append_to_chunks = |v: u64| {
+            chunks.push(v);
+        };
+
+        parse_long_vector(input, chunks_offset, &mut append_to_chunks);
+
+        files.push(FileEntry { id: file_id, name, symlink, directory_id, language: language_mask, size: file_size, chunk_ids: chunks })
     };
 
     let files_offset_parts = [
@@ -268,13 +315,13 @@ fn files(input: &[u8], files_start: u32) -> Vec<FileEntry> {
         "file_id",
         "directory_id",
         "file_size",
-        "name",
-        "flags",
+        "name_offset",
+        "language_mask",
         "unknown2",
         "unknown3",
         "unknown4",
         "unknown5",
-        "link",
+        "symlink_offset",
         "unknown6",
         "unknown7",
         "unknown8",
