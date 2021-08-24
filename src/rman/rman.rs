@@ -9,13 +9,13 @@ use std::collections::HashMap;
 #[path = "../macros.rs"]
 mod macros;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct File {
     header: Header,
     body: Body,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct Header {
     magic: String,
     major: u8,
@@ -28,7 +28,7 @@ struct Header {
     decompressed_length: u32,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct OffsetMap {
     bundle_offset: u32,
     language_offset: u32,
@@ -36,26 +36,26 @@ struct OffsetMap {
     folder_offset: u32,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct Bundle {
     bundle_id: u64,
     chunks: Vec<Chunk>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct Chunk {
     compressed_size: u32,
     uncompressed_size: u32,
     chunk_id: u64,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct Language {
     id: u8,
     name: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct FileEntry {
     id: u64,
     name: String,
@@ -66,14 +66,14 @@ struct FileEntry {
     chunk_ids: Vec<u64>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct Directory {
     id: u64,
     parent_id: u64,
     name: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct Body {
     bundles: Vec<Bundle>,
     languages: Vec<Language>,
@@ -93,10 +93,8 @@ pub fn parse(input: &[u8]) -> File {
     let languages = languages(&decompressed, offsets.language_offset);
     let directories = directories(&decompressed, offsets.folder_offset);
     let files = files(&decompressed, offsets.file_offset);
-    println!("{:?}", directories);
 
     let body = Body { bundles, languages, files, directories };
-
     File { header, body }
 }
 
@@ -131,7 +129,7 @@ fn offset_map(input: &[u8]) -> OffsetMap {
     }
 }
 
-fn parse_vector<F>(input: &[u8], table_offset: u32, parts: &Vec<&str>, f: &mut F)
+fn parse_vector<F>(input: &[u8], table_offset: u32, parts: &[&str], f: &mut F)
 where
     F: FnMut(u32, HashMap<String, u16>),
 {
@@ -298,7 +296,7 @@ fn files(input: &[u8], files_start: u32) -> Vec<FileEntry> {
         let language_mask = crate::parse_single!(le_u32, &input[(start_offset + language_mask_offset as u32) as usize..]);
 
         let mut chunks = Vec::<u64>::new();
-        let chunks_offset = entry_offsets.get("chunks").unwrap().to_owned() as u32;
+        let chunks_offset = start_offset + entry_offsets.get("chunks").unwrap().to_owned() as u32;
 
         let mut append_to_chunks = |v: u64| {
             chunks.push(v);

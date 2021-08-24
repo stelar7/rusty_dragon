@@ -6,3 +6,6 @@ edition = "2018"
 [dependencies]
 nom = "6"
 zstd = "0.9"
+serde = "0.9"
+serde_json = "0.9"
+serde_derive = "0.9"
