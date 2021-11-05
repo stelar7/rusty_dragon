@@ -6,9 +6,6 @@ use nom::{
 };
 use std::collections::HashMap;
 
-#[path = "../macros.rs"]
-mod macros;
-
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct File {
     header: Header,
